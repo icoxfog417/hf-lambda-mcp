@@ -10,7 +10,7 @@ YAML *profile*; no model-specific code.
 The first profile is **[PLaMo 3 Translate](https://huggingface.co/pfnet/plamo-3-translate-2b-GGUF)**
 by Preferred Networks, which translates between 53 languages.
 
-[![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://us-east-2.console.aws.amazon.com/cloudformation/home?region=us-east-2#/stacks/create?stackName=plamo-translate-mcp&templateURL=TEMPLATE_URL)
+[![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://us-east-2.console.aws.amazon.com/cloudformation/home?region=us-east-2#/stacks/create?stackName=plamo-translate-mcp&templateURL=https://aws-ml-jp.s3.ap-northeast-1.amazonaws.com/asset-deployments/HFLambdaMCP.yaml)
 
 > [!IMPORTANT]
 > **Model licenses.** This repository (Apache-2.0) only contains hosting code. The deployment downloads
@@ -50,7 +50,9 @@ by Preferred Networks, which translates between 53 languages.
 
 ### 1. Deploy
 
-Click **Launch Stack** (or deploy `deployments/template.yaml` yourself) and choose:
+Click **Launch Stack** (opens us-east-2; change the region in the console if you like), or deploy
+`deployments/HFLambdaMCP.yaml` yourself. The template is also hosted at
+`https://aws-ml-jp.s3.ap-northeast-1.amazonaws.com/asset-deployments/HFLambdaMCP.yaml`. Choose:
 
 | Parameter | Default | Notes |
 |---|---|---|
@@ -188,7 +190,7 @@ inversely proportional to the model file size; models of about 0.5–3 GB (≈0.
 ```bash
 uv sync --all-extras                 # client + build + dev dependencies
 uv run pytest                        # unit tests (no AWS needed)
-uv run cfn-lint deployments/template.yaml
+uv run cfn-lint deployments/HFLambdaMCP.yaml
 
 # Build an image locally
 uv run --extra build hf-lambda-mcp-build profiles/plamo-3-translate.yaml --variant 0.8b --out build

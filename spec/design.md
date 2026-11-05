@@ -16,7 +16,7 @@ first model; the architecture is a general "Hugging Face model → MCP tool" pat
 | Lambda handler (`server/`) | Gateway tool calls; inline execution; asynchronous S3-backed document jobs |
 | AgentCore Gateway | MCP endpoint, AWS_IAM inbound auth, Lambda target with S3-hosted tool schema |
 | Local client (`client/cli.py`) | stdio MCP server: proxies remote tools with SigV4 and adds `<tool>_file` tools that move files through presigned URLs |
-| `deployments/template.yaml` | One stack: S3, ECR, CodeBuild, build coordinator, Lambda (+version/alias), Gateway, target |
+| `deployments/HFLambdaMCP.yaml` | One stack: S3, ECR, CodeBuild, build coordinator, Lambda (+version/alias), Gateway, target |
 
 ## Key decisions
 
