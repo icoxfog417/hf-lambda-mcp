@@ -1,0 +1,519 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  hf-lambda-mcp: serve a small Hugging Face model as MCP tools on AWS Lambda behind Amazon Bedrock
+  AgentCore Gateway (IAM/SigV4). CodeBuild downloads the model from Hugging Face into your account
+  and builds the Lambda image. You are responsible for complying with the model's license
+  (see the ModelLicense output). https://github.com/icoxfog417/hf-lambda-mcp
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: {default: Model}
+        Parameters: [ModelProfile, ModelVariant, ContextLength]
+      - Label: {default: Compute}
+        Parameters: [Architecture, MemorySize, EnableSnapStart]
+      - Label: {default: Source (advanced)}
+        Parameters: [SourceRepository, SourceRef, LlamaCppRef]
+    ParameterLabels:
+      ModelProfile: {default: Model profile (profiles/<name>.yaml)}
+      ModelVariant: {default: Model variant (size)}
+
+Parameters:
+  ModelProfile:
+    Type: String
+    Default: plamo-3-translate
+    AllowedPattern: '[a-z0-9][a-z0-9-]{0,40}'
+    Description: Name of a profile in the repository's profiles/ directory.
+  ModelVariant:
+    Type: String
+    Default: 2b
+    Description: >-
+      Variant declared by the profile. For plamo-3-translate - 0.8b (fastest), 2b (recommended),
+      8b (highest quality, slow on Lambda CPUs).
+  ContextLength:
+    Type: Number
+    Default: 0
+    MinValue: 0
+    Description: llama.cpp context size in tokens. 0 = profile/model default (max 8192).
+  Architecture:
+    Type: String
+    Default: x86_64
+    AllowedValues: [x86_64, arm64]
+  MemorySize:
+    Type: Number
+    Default: 10240
+    MinValue: 2048
+    MaxValue: 10240
+    Description: Lambda memory in MB. vCPUs scale with memory (10240 MB = 6 vCPUs); inference speed scales with vCPUs.
+  EnableSnapStart:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      Snapshot the function after the model is loaded. Strongly recommended - without it every cold
+      start reloads the model from the container image (minutes for multi-GB models).
+  SourceRepository:
+    Type: String
+    Default: https://github.com/icoxfog417/hf-lambda-mcp.git
+  SourceRef:
+    Type: String
+    Default: main
+    Description: Branch or tag of SourceRepository to build.
+  LlamaCppRef:
+    Type: String
+    Default: v0.9.0
+    Description: llama.cpp git tag to build.
+
+Conditions:
+  IsArm: !Equals [!Ref Architecture, arm64]
+  UseSnapStart: !Equals [!Ref EnableSnapStart, 'true']
+
+Resources:
+  # ------------------------------------------------------------------ storage
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: {SSEAlgorithm: AES256}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules: [{ObjectOwnership: BucketOwnerEnforced}]
+      LifecycleConfiguration:
+        Rules:
+          - {Id: uploads, Prefix: uploads/, Status: Enabled, ExpirationInDays: 1}
+          - {Id: results, Prefix: results/, Status: Enabled, ExpirationInDays: 1}
+          - {Id: jobs, Prefix: jobs/, Status: Enabled, ExpirationInDays: 2}
+          - {Id: build, Prefix: build/, Status: Enabled, ExpirationInDays: 30}
+
+  ArtifactBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ArtifactBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource: [!GetAtt ArtifactBucket.Arn, !Sub '${ArtifactBucket.Arn}/*']
+            Condition: {Bool: {'aws:SecureTransport': 'false'}}
+
+  ImageRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      EmptyOnDelete: true
+      ImageScanningConfiguration: {ScanOnPush: false}
+      LifecyclePolicy:
+        LifecyclePolicyText: >-
+          {"rules":[{"rulePriority":1,"description":"keep last 3 images","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":3},"action":{"type":"expire"}}]}
+
+  # ------------------------------------------------------------------ image build (CodeBuild)
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: codebuild.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: build
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*'
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                  - ecr:PutImage
+                  - ecr:DescribeImages
+                Resource: !GetAtt ImageRepository.Arn
+              - Effect: Allow
+                Action: [s3:PutObject, s3:GetObject]
+                Resource: !Sub '${ArtifactBucket.Arn}/build/*'
+
+  ImageBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Description: Builds the hf-lambda-mcp Lambda image (llama.cpp + Hugging Face model)
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      TimeoutInMinutes: 60
+      Artifacts: {Type: NO_ARTIFACTS}
+      LogsConfig:
+        CloudWatchLogs: {Status: ENABLED}
+      Environment:
+        Type: !If [IsArm, ARM_CONTAINER, LINUX_CONTAINER]
+        ComputeType: BUILD_GENERAL1_LARGE
+        Image: !If [IsArm, 'aws/codebuild/amazonlinux-aarch64-standard:3.0', 'aws/codebuild/amazonlinux-x86_64-standard:5.0']
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - {Name: IMAGE_REPO, Value: !GetAtt ImageRepository.RepositoryUri}
+          - {Name: ARTIFACT_BUCKET, Value: !Ref ArtifactBucket}
+          - {Name: PLATFORM, Value: !If [IsArm, linux/arm64, linux/amd64]}
+      Source:
+        Type: NO_SOURCE
+        BuildSpec: |
+          version: 0.2
+          env:
+            shell: bash
+          phases:
+            install:
+              runtime-versions:
+                python: 3.12
+              commands:
+                - pip install --quiet uv
+            build:
+              commands:
+                - set -euo pipefail
+                - git clone --depth 1 --branch "$SOURCE_REF" "$SOURCE_REPOSITORY" /tmp/src
+                - cd /tmp/src && echo "commit $(git rev-parse HEAD)"
+                - test -f "profiles/$MODEL_PROFILE.yaml" || { echo "profile $MODEL_PROFILE not found"; ls profiles; exit 1; }
+                - CTX_ARG=""; if [ "${CONTEXT_LENGTH:-0}" != "0" ]; then CTX_ARG="--context-length $CONTEXT_LENGTH"; fi
+                - uv run --no-dev --extra build hf-lambda-mcp-build "profiles/$MODEL_PROFILE.yaml" --variant "$MODEL_VARIANT" --out build $CTX_ARG | tee build/summary.json
+                - chmod -R a+rX build
+                - TAG="$MODEL_PROFILE-$MODEL_VARIANT-$(git rev-parse --short HEAD)-$(date +%Y%m%d%H%M%S)"
+                - aws ecr get-login-password | docker login --username AWS --password-stdin "${IMAGE_REPO%%/*}"
+                - DOCKER_BUILDKIT=1 docker build --platform "$PLATFORM" --build-arg LLAMA_CPP_REF="$LLAMA_CPP_REF" -f docker/Dockerfile -t "$IMAGE_REPO:$TAG" .
+                - docker push "$IMAGE_REPO:$TAG"
+                - DIGEST=$(aws ecr describe-images --repository-name "${IMAGE_REPO#*/}" --image-ids imageTag="$TAG" --query 'imageDetails[0].imageDigest' --output text)
+                - aws s3 cp build/tool-schema.json "s3://$ARTIFACT_BUCKET/build/$TAG/tool-schema.json"
+                - |
+                  python3 - <<EOF
+                  import json
+                  rt = json.load(open("build/runtime.json"))
+                  out = {"ImageUri": "$IMAGE_REPO@$DIGEST", "ImageTag": "$TAG",
+                         "ToolSchemaUri": "s3://$ARTIFACT_BUCKET/build/$TAG/tool-schema.json",
+                         "ModelRepo": rt["model"]["repo"], "ModelFile": rt["model"]["file"],
+                         "ModelLicense": rt["model"].get("license_link") or "",
+                         "ProfileName": rt["name"]}
+                  json.dump(out, open("build/result.json", "w"))
+                  print(json.dumps(out, indent=2))
+                  EOF
+                - aws s3 cp build/result.json "s3://$ARTIFACT_BUCKET/build/results/$CODEBUILD_BUILD_ID.json"
+
+  # Custom resource: starts the build and returns only when CodeBuild reports completion
+  # (EventBridge -> same function -> CloudFormation response URL).
+  BuildCoordinatorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: lambda.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: coordinate
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [codebuild:StartBuild, codebuild:BatchGetBuilds]
+                Resource: !GetAtt ImageBuild.Arn
+              - Effect: Allow
+                Action: [s3:GetObject]
+                Resource: !Sub '${ArtifactBucket.Arn}/build/results/*'
+              - Effect: Allow
+                Action: [s3:ListBucket, s3:ListBucketVersions]
+                Resource: !GetAtt ArtifactBucket.Arn
+              - Effect: Allow
+                Action: [s3:DeleteObject, s3:DeleteObjectVersion]
+                Resource: !Sub '${ArtifactBucket.Arn}/*'
+
+  BuildCoordinator:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: hf-lambda-mcp build coordinator (CloudFormation custom resource)
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 300
+      Role: !GetAtt BuildCoordinatorRole.Arn
+      Environment:
+        Variables:
+          PROJECT: !Ref ImageBuild
+          BUCKET: !Ref ArtifactBucket
+      Code:
+        ZipFile: |
+          import json, os, urllib.request
+          import boto3
+
+          cb = boto3.client("codebuild")
+          s3 = boto3.client("s3")
+
+          def respond(req, status, reason="", data=None, physical_id=None):
+              body = json.dumps({
+                  "Status": status, "Reason": (reason or status)[:3000],
+                  "PhysicalResourceId": physical_id or req.get("PhysicalResourceId") or req["LogicalResourceId"],
+                  "StackId": req["StackId"], "RequestId": req["RequestId"],
+                  "LogicalResourceId": req["LogicalResourceId"], "Data": data or {},
+              }).encode()
+              r = urllib.request.Request(req["ResponseURL"], data=body, method="PUT",
+                                         headers={"Content-Type": "", "Content-Length": str(len(body))})
+              urllib.request.urlopen(r, timeout=30).read()
+
+          def empty_bucket(bucket):
+              paginator = s3.get_paginator("list_object_versions")
+              for page in paginator.paginate(Bucket=bucket):
+                  objs = [{"Key": o["Key"], "VersionId": o["VersionId"]}
+                          for o in page.get("Versions", []) + page.get("DeleteMarkers", [])]
+                  for i in range(0, len(objs), 1000):
+                      s3.delete_objects(Bucket=bucket, Delete={"Objects": objs[i:i + 1000], "Quiet": True})
+
+          def on_cfn(req):
+              kind = req["ResourceType"]
+              if kind == "Custom::BucketCleaner":
+                  if req["RequestType"] == "Delete":
+                      try:
+                          empty_bucket(os.environ["BUCKET"])
+                      except Exception as e:  # never block stack deletion
+                          print("empty bucket failed:", e)
+                  return respond(req, "SUCCESS", physical_id=os.environ["BUCKET"])
+              if req["RequestType"] == "Delete":
+                  return respond(req, "SUCCESS")
+              props = req["ResourceProperties"]
+              env = [{"name": k, "value": str(props[p]), "type": "PLAINTEXT"} for k, p in [
+                  ("MODEL_PROFILE", "ModelProfile"), ("MODEL_VARIANT", "ModelVariant"),
+                  ("CONTEXT_LENGTH", "ContextLength"), ("SOURCE_REPOSITORY", "SourceRepository"),
+                  ("SOURCE_REF", "SourceRef"), ("LLAMA_CPP_REF", "LlamaCppRef")]]
+              # The pending CloudFormation request is carried by the build itself.
+              env.append({"name": "CFN_REQUEST", "value": json.dumps({k: req[k] for k in (
+                  "ResponseURL", "StackId", "RequestId", "LogicalResourceId")}), "type": "PLAINTEXT"})
+              try:
+                  b = cb.start_build(projectName=os.environ["PROJECT"], environmentVariablesOverride=env)
+                  print("started", b["build"]["id"])
+              except Exception as e:
+                  respond(req, "FAILED", f"could not start CodeBuild: {e}")
+
+          def on_build_event(event):
+              d = event["detail"]
+              build_id = d["build-id"].split("/")[-1]
+              build = cb.batch_get_builds(ids=[build_id])["builds"][0]
+              env = {v["name"]: v["value"] for v in build["environment"]["environmentVariables"]}
+              if "CFN_REQUEST" not in env:
+                  return
+              req = json.loads(env["CFN_REQUEST"])
+              status = d["build-status"]
+              logs = build.get("logs", {}).get("deepLink", "")
+              if status == "SUCCEEDED":
+                  try:
+                      key = f"build/results/{build_id}.json"
+                      data = json.loads(s3.get_object(Bucket=os.environ["BUCKET"], Key=key)["Body"].read())
+                      respond(req, "SUCCESS", data=data, physical_id=data["ImageTag"])
+                  except Exception as e:
+                      respond(req, "FAILED", f"build succeeded but result is missing: {e}")
+              else:
+                  respond(req, "FAILED", f"image build {status}. Logs: {logs}")
+
+          def handler(event, context):
+              print(json.dumps(event)[:2000])
+              if event.get("source") == "aws.codebuild":
+                  return on_build_event(event)
+              try:
+                  on_cfn(event)
+              except Exception as e:
+                  respond(event, "FAILED", str(e))
+
+  BuildStateRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Report hf-lambda-mcp image build completion to CloudFormation
+      EventPattern:
+        source: [aws.codebuild]
+        detail-type: [CodeBuild Build State Change]
+        detail:
+          project-name: [!Ref ImageBuild]
+          build-status: [SUCCEEDED, FAILED, STOPPED, FAULT, TIMED_OUT]
+      Targets:
+        - Id: coordinator
+          Arn: !GetAtt BuildCoordinator.Arn
+
+  BuildStateRulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref BuildCoordinator
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt BuildStateRule.Arn
+
+  BucketCleaner:
+    Type: Custom::BucketCleaner
+    Properties:
+      ServiceToken: !GetAtt BuildCoordinator.Arn
+      Bucket: !Ref ArtifactBucket
+
+  ModelImage:
+    Type: Custom::ModelImage
+    DependsOn: [BuildStateRulePermission, BucketCleaner]
+    Properties:
+      ServiceToken: !GetAtt BuildCoordinator.Arn
+      ServiceTimeout: 3600
+      ModelProfile: !Ref ModelProfile
+      ModelVariant: !Ref ModelVariant
+      ContextLength: !Ref ContextLength
+      SourceRepository: !Ref SourceRepository
+      SourceRef: !Ref SourceRef
+      LlamaCppRef: !Ref LlamaCppRef
+      Architecture: !Ref Architecture
+
+  # ------------------------------------------------------------------ model Lambda
+  ModelFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: lambda.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: jobs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [s3:GetObject, s3:PutObject]
+                Resource:
+                  - !Sub '${ArtifactBucket.Arn}/uploads/*'
+                  - !Sub '${ArtifactBucket.Arn}/jobs/*'
+                  - !Sub '${ArtifactBucket.Arn}/results/*'
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt ArtifactBucket.Arn
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-model*'
+
+  ModelFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: ModelFunctionLogs
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-model'
+      Description: !Sub 'hf-lambda-mcp ${ModelImage.ModelRepo}/${ModelImage.ModelFile}'
+      PackageType: Image
+      Code: {ImageUri: !GetAtt ModelImage.ImageUri}
+      Architectures: [!Ref Architecture]
+      MemorySize: !Ref MemorySize
+      Timeout: 900
+      Role: !GetAtt ModelFunctionRole.Arn
+      SnapStart: !If [UseSnapStart, {ApplyOn: PublishedVersions}, !Ref 'AWS::NoValue']
+      Environment:
+        Variables:
+          JOB_BUCKET: !Ref ArtifactBucket
+
+  ModelFunctionLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-model'
+      RetentionInDays: 30
+
+  # A new version (and SnapStart snapshot) is published whenever the image changes.
+  ModelFunctionVersion:
+    Type: AWS::Lambda::Version
+    Properties:
+      FunctionName: !Ref ModelFunction
+      Description: !GetAtt ModelImage.ImageTag
+
+  ModelFunctionAlias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Ref ModelFunction
+      FunctionVersion: !GetAtt ModelFunctionVersion.Version
+      Name: live
+
+  ModelFunctionAsyncConfig:
+    Type: AWS::Lambda::EventInvokeConfig
+    DependsOn: ModelFunctionAlias
+    Properties:
+      FunctionName: !Ref ModelFunction
+      Qualifier: live
+      MaximumRetryAttempts: 0
+
+  # ------------------------------------------------------------------ AgentCore Gateway
+  GatewayRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: bedrock-agentcore.amazonaws.com}
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals: {'aws:SourceAccount': !Ref 'AWS::AccountId'}
+      Policies:
+        - PolicyName: invoke-model
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: [!Ref ModelFunctionAlias]
+
+  Gateway:
+    Type: AWS::BedrockAgentCore::Gateway
+    Properties:
+      Name: !Sub '${AWS::StackName}'
+      Description: !Sub 'hf-lambda-mcp - ${ModelProfile} (${ModelVariant})'
+      AuthorizerType: AWS_IAM
+      ProtocolType: MCP
+      RoleArn: !GetAtt GatewayRole.Arn
+      ProtocolConfiguration:
+        Mcp:
+          Instructions: !Sub >-
+            Tools backed by the Hugging Face model ${ModelImage.ModelRepo} running on AWS Lambda.
+            Use them to delegate bulk work to a small, inexpensive model. For local files, use the
+            hf-lambda-mcp client which adds *_file tools.
+
+  GatewayTarget:
+    Type: AWS::BedrockAgentCore::GatewayTarget
+    Properties:
+      GatewayIdentifier: !Ref Gateway
+      Name: !Ref ModelProfile
+      Description: !Sub '${ModelImage.ModelRepo}'
+      CredentialProviderConfigurations:
+        - CredentialProviderType: GATEWAY_IAM_ROLE
+      TargetConfiguration:
+        Mcp:
+          Lambda:
+            LambdaArn: !Ref ModelFunctionAlias
+            ToolSchema:
+              S3:
+                Uri: !GetAtt ModelImage.ToolSchemaUri
+
+Outputs:
+  McpEndpointUrl:
+    Description: MCP endpoint (IAM/SigV4). Use with the hf-lambda-mcp client or mcp-proxy-for-aws.
+    Value: !GetAtt Gateway.GatewayUrl
+  ClientCommand:
+    Description: Command for your MCP client configuration (e.g. .mcp.json)
+    Value: !Sub 'uvx --from git+${SourceRepository}@${SourceRef} hf-lambda-mcp ${Gateway.GatewayUrl}'
+  Model:
+    Value: !Sub '${ModelImage.ModelRepo}/${ModelImage.ModelFile}'
+  ModelLicense:
+    Description: Review and comply with the model license before use.
+    Value: !GetAtt ModelImage.ModelLicense
+  ModelFunctionName:
+    Value: !Ref ModelFunction
+  ArtifactBucketName:
+    Value: !Ref ArtifactBucket

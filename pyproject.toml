@@ -1,0 +1,41 @@
+[project]
+name = "hf-lambda-mcp"
+version = "0.1.0"
+description = "Serve small Hugging Face models as MCP tools on AWS Lambda behind Amazon Bedrock AgentCore Gateway"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.12"
+# Default dependencies are for the local MCP client (`uvx hf-lambda-mcp ...`).
+dependencies = [
+    "mcp-proxy-for-aws>=1.8.0",
+    "mcp>=1.20",
+    "httpx>=0.27",
+    "boto3>=1.41",
+]
+
+[project.optional-dependencies]
+# Build-time: resolve a profile against Hugging Face and download artifacts (used by CodeBuild).
+build = [
+    "pyyaml>=6",
+    "jinja2>=3.1",
+    "gguf>=0.17",
+    "huggingface_hub>=0.34",
+]
+
+[project.scripts]
+hf-lambda-mcp = "hf_lambda_mcp.client.cli:main"
+hf-lambda-mcp-build = "hf_lambda_mcp.profile:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "pyyaml>=6", "jinja2>=3.1", "moto[s3,lambda]>=5", "cfn-lint>=1"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hf_lambda_mcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

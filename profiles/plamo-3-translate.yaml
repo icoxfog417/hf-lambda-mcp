@@ -1,0 +1,64 @@
+# PLaMo 3 Translate (Preferred Networks) — https://huggingface.co/pfnet/plamo-3-translate-2b-GGUF
+#
+# Only what cannot be derived from the Hugging Face artifacts lives here.
+# Derived automatically at build time:
+#   - prompt format           -> chat_template.jinja in the repo (or GGUF metadata)
+#   - parameter names         -> variables referenced by the chat template (validated against `params`)
+#   - input validation        -> raise_exception() calls in the chat template
+#   - context length, EOS     -> GGUF metadata
+#   - license                 -> Hugging Face model card metadata
+name: plamo-3-translate
+
+source:
+  repo: pfnet/plamo-3-translate-{variant}-GGUF
+  file: plamo-3-translate-{variant}-Q4_K_M.gguf
+  variants: [0.8b, 2b, 8b]
+  default_variant: 2b
+
+generation:
+  temperature: 0
+
+tools:
+  - name: translate
+    description: >-
+      Translate text with PLaMo 3 Translate, a translation-specialized model supporting 53 languages
+      (ja, en, zh-hans, zh-hant, ko, de, fr, es, ru, ar, th, vi, id, it, nl, ...). Use it to delegate
+      bulk translation instead of translating yourself. Markdown structure is preserved. Long text is
+      split into chunks automatically, with the previous chunk passed as history for consistent wording.
+      For files, prefer the file variant of this tool if available.
+    input:
+      name: text
+      description: Source text to translate (plain text or Markdown).
+    params:
+      target_lang:
+        type: string
+        required: true
+        description: >-
+          Target language as a lowercase code without region subtag, e.g. en, ja, ko, de, fr,
+          zh-hans (Simplified Chinese), zh-hant (Traditional Chinese), or ja(easy) for easy Japanese.
+      source_lang:
+        type: string
+        description: Source language code (same format as target_lang). Omit to auto-detect.
+      context:
+        type: string
+        description: >-
+          Reference text that helps disambiguation (e.g. surrounding paragraphs, document purpose).
+          It is not translated.
+      glossary:
+        type: array
+        description: Term pairs that must be translated consistently.
+        items:
+          type: object
+          properties:
+            source: {type: string, description: Term in the source language}
+            target: {type: string, description: Required translation of the term}
+          required: [source, target]
+      form:
+        type: string
+        enum: [plain, polite]
+        description: Japanese style (plain=だ・である, polite=です・ます). Only valid when target_lang is ja.
+    document:
+      formats: [txt, md]
+      max_chunk_tokens: 1024
+      history: 1
+      output_name: "{stem}.{target_lang}{ext}"
