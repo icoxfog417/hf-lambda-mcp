@@ -47,11 +47,12 @@ Parameters:
     Description: Lambda memory in MB. vCPUs scale with memory (10240 MB = 6 vCPUs); inference speed scales with vCPUs.
   EnableSnapStart:
     Type: String
-    Default: 'true'
+    Default: 'false'
     AllowedValues: ['true', 'false']
     Description: >-
-      Snapshot the function after the model is loaded. Strongly recommended - without it every cold
-      start reloads the model from the container image (minutes for multi-GB models).
+      Snapshot the function after the model is loaded. Cold starts drop from ~30 s to ~11 s (2B model),
+      but SnapStart charges for keeping the snapshot cached even when idle (about USD 40/month at
+      10240 MB; proportional to MemorySize). false = no idle cost.
   SourceRepository:
     Type: String
     Default: https://github.com/icoxfog417/hf-lambda-mcp.git
@@ -185,6 +186,7 @@ Resources:
                 - git clone --depth 1 --branch "$SOURCE_REF" "$SOURCE_REPOSITORY" /tmp/src
                 - cd /tmp/src && echo "commit $(git rev-parse HEAD)"
                 - test -f "profiles/$MODEL_PROFILE.yaml" || { echo "profile $MODEL_PROFILE not found"; ls profiles; exit 1; }
+                - mkdir -p build
                 - CTX_ARG=""; if [ "${CONTEXT_LENGTH:-0}" != "0" ]; then CTX_ARG="--context-length $CONTEXT_LENGTH"; fi
                 - uv run --no-dev --extra build hf-lambda-mcp-build "profiles/$MODEL_PROFILE.yaml" --variant "$MODEL_VARIANT" --out build $CTX_ARG | tee build/summary.json
                 - chmod -R a+rX build

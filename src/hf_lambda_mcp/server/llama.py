@@ -31,6 +31,7 @@ class LlamaServer:
     def __init__(self, runtime: dict[str, Any]):
         self.runtime = runtime
         self.proc: subprocess.Popen | None = None
+        self.prefetch_s = 0.0
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -54,8 +55,39 @@ class LlamaServer:
             cmd += extra.split()
         return cmd
 
+    def prefetch(self) -> float:
+        """Read the model file sequentially with parallel threads before llama-server mmaps it.
+
+        Lambda loads container images lazily; llama.cpp's scattered mmap page faults against a lazy image
+        take minutes for multi-GB models, while parallel sequential reads warm the page cache in seconds.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        threads = int(os.environ.get("PREFETCH_THREADS", "8"))
+        if threads <= 0:
+            return 0.0
+        t0 = time.time()
+        path = f"{MODEL_DIR}/model.gguf"
+        size = os.path.getsize(path)
+        block = 16 << 20
+
+        def read(i: int) -> None:
+            fd = os.open(path, os.O_RDONLY)
+            try:
+                offset = i * block
+                while offset < size:
+                    os.pread(fd, block, offset)
+                    offset += threads * block
+            finally:
+                os.close(fd)
+
+        with ThreadPoolExecutor(threads) as ex:
+            list(ex.map(read, range(threads)))
+        return time.time() - t0
+
     def start(self, timeout: float = 600) -> float:
         t0 = time.time()
+        self.prefetch_s = self.prefetch()
         log = open(LOG_PATH, "w")
         self.proc = subprocess.Popen(self.command(), stdout=log, stderr=subprocess.STDOUT)
         while time.time() - t0 < timeout:

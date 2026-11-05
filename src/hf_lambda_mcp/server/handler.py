@@ -31,7 +31,7 @@ _t0 = time.time()
 _load_s = SERVER.start()
 ENGINE = Engine(RUNTIME, SERVER)
 ENGINE.warmup()
-INIT_STATS = {"load_s": round(_load_s, 2), "init_s": round(time.time() - _t0, 2), "cpus": os.cpu_count()}
+INIT_STATS = {"prefetch_s": round(SERVER.prefetch_s, 2), "load_s": round(_load_s, 2), "init_s": round(time.time() - _t0, 2), "cpus": os.cpu_count()}
 logger.info("model ready %s", json.dumps(INIT_STATS))
 
 
