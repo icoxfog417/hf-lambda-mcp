@@ -55,3 +55,12 @@ def test_code_blocks_are_not_sent_to_model(engine):
     r = engine.run_inline("translate", {"text": md, "target_lang": "en"})
     assert r["output"] == "INTRO TEXT\n\n```\ncode here\n```\n\nOUTRO TEXT\n"
     assert not any("code here" in m["content"] for c in engine.server.calls for m in c["messages"])
+
+
+def test_clean_template_error():
+    from hf_lambda_mcp.server.llama import clean_error
+
+    raw = ("Unable to generate parser for this template. Automatic parser generation failed: \n----\n"
+           "While executing CallExpression at line 23 ...\nError: Jinja Exception: target_lang must use lowercase language codes.")
+    assert clean_error(raw) == "invalid arguments: target_lang must use lowercase language codes."
+    assert clean_error("other failure") == "other failure"

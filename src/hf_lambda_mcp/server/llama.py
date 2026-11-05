@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import time
 import urllib.error
@@ -21,6 +22,15 @@ LLAMA_BIN = os.environ.get("LLAMA_SERVER_BIN", "/opt/llama/llama-server")
 MODEL_DIR = os.environ.get("MODEL_DIR", "/opt/model")
 PORT = int(os.environ.get("LLAMA_PORT", "18080"))
 LOG_PATH = "/tmp/llama-server.log"
+
+
+_TEMPLATE_ERROR = re.compile(r"Jinja Exception:\s*(.+?)\s*$", re.S)
+
+
+def clean_error(message: str) -> str:
+    """Reduce llama-server template errors to the template's own message (raise_exception text)."""
+    m = _TEMPLATE_ERROR.search(message)
+    return f"invalid arguments: {m.group(1)}" if m else message
 
 
 class ModelError(RuntimeError):
@@ -130,7 +140,7 @@ class LlamaServer:
                 msg = msg.get("message", raw) if isinstance(msg, dict) else str(msg)
             except ValueError:
                 msg = raw
-            raise ModelError(msg) from None
+            raise ModelError(clean_error(msg)) from None
 
     def count_tokens(self, text: str) -> int:
         if not text:

@@ -26,7 +26,7 @@ by Preferred Networks, which translates between 53 languages.
 ┌────────────┐        ┌──────────────┐           ┌──────────────────┐        ┌────────────────────────────┐
 │  AI agent  │◄──────►│ hf-lambda-mcp│◄─────────►│ AgentCore Gateway│───────►│ Lambda (container image)   │
 │(Claude Code│        │ local client │           │   (AWS_IAM auth) │        │  llama-server (llama.cpp)  │
-│  Desktop..)│        │  (uvx)       │           └──────────────────┘        │  + GGUF model, SnapStart   │
+│  Desktop..)│        │  (uvx)       │           └──────────────────┘        │  + GGUF model (prefetched) │
 └────────────┘        └──────┬───────┘                                     └─────────────┬──────────────┘
                              │ presigned PUT / GET (files never pass through the agent)  │ async jobs
                              └──────────────────────►  S3 bucket (uploads / results, 1-day expiry) ◄─┘
@@ -35,8 +35,9 @@ by Preferred Networks, which translates between 53 languages.
 - **One-click deploy.** The CloudFormation template creates a CodeBuild project that resolves the
   profile, downloads the model from Hugging Face, compiles llama.cpp and builds the Lambda image.
   The stack waits for the build and then creates the Lambda function, the Gateway and its target.
-- **Lambda SnapStart.** The function is snapshotted *after* the model is loaded, so cold starts restore
-  in about 2 seconds instead of reloading gigabytes from the image.
+- **Fast cold starts, zero idle cost.** The model file is prefetched with parallel sequential reads
+  before llama.cpp loads it: a 2B model cold-starts in about 30 s instead of 7 minutes. Optionally,
+  Lambda SnapStart restores a snapshot taken after the model has loaded (~11 s), at the price of a snapshot-cache fee while idle.
 - **Model-agnostic server.** Prompt format, parameter names and input validation come from the model's
   own chat template and GGUF metadata; the profile only adds what those artifacts cannot say
   (agent-facing descriptions, which file to deploy, document handling).
@@ -57,9 +58,9 @@ Click **Launch Stack** (or deploy `deployments/template.yaml` yourself) and choo
 | `ModelVariant` | `2b` | `0.8b` (fastest), `2b` (recommended), `8b` (best quality, slow on CPU) |
 | `MemorySize` | `10240` | vCPUs scale with memory; 10240 MB = 6 vCPUs, the fastest option |
 | `Architecture` | `x86_64` | `arm64` is also supported |
-| `EnableSnapStart` | `true` | Keep enabled; see benchmarks |
+| `EnableSnapStart` | `false` | `true` = faster cold starts, but an idle cost of ≈ USD 40/month at 10240 MB (see benchmarks) |
 
-Deployment takes about 25–35 minutes (image build ≈ 15 min, SnapStart snapshot ≈ 5–10 min).
+Deployment takes about 20–30 minutes (the image build takes most of it; add 5–10 minutes with SnapStart).
 
 ### 2. Connect your agent
 
@@ -122,12 +123,13 @@ paragraph into English (≈105 output tokens):
 | 2B | 10240 MB (6) | 19 tok/s | 65–69 tok/s | 5.5–7 s |
 | 2B | 5308 MB (4) | 11 tok/s | 19–35 tok/s | 9.8 s |
 
-Cold start, 2B, 10240 MB:
+Cold start (new execution environment) for the 2B model at 10240 MB, wall clock including the first request:
 
-| | Without SnapStart | With SnapStart |
+| Strategy | Cold start | Idle cost |
 |---|---|---|
-| New execution environment | **415 s** (model is lazily read from the image) | **2.2 s** restore |
-| First request after a cold start (wall clock) | ~420 s | 11 s |
+| llama.cpp mmap straight from the lazily loaded image | ~420 s | none |
+| **Parallel prefetch of the model file** (default) | **~30 s** | none |
+| SnapStart (`EnableSnapStart=true`) | ~11 s (2.2 s restore) | snapshot cache ≈ USD 0.0000015 per GB-second ≈ USD 40/month at 10240 MB |
 
 Peak memory for the 2B model is about 3.1 GB. Larger memory settings cost about the same per request,
 because the requests finish faster.
