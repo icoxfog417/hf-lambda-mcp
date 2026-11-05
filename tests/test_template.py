@@ -5,7 +5,7 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
-TEMPLATE = ROOT / "deployments" / "template.yaml"
+TEMPLATE = ROOT / "deployments" / "HFLambdaMCP.yaml"
 
 
 class Loader(yaml.SafeLoader):

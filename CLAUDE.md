@@ -14,7 +14,7 @@ The first profile is PLaMo 3 Translate. See `README.md` and `spec/design.md`.
 - **The Lambda runtime uses only the standard library plus boto3** (`server/`, `documents.py`). Build-time
   dependencies (`yaml`, `jinja2`, `gguf`, `huggingface_hub`) are imported lazily in `profile.py`.
 - **File contents never pass through the agent.** The `*_file` tools exchange data via presigned S3 URLs.
-- Keep the one-click template self-contained (`deployments/template.yaml`, buildspec inlined).
+- Keep the one-click template self-contained (`deployments/HFLambdaMCP.yaml`, buildspec inlined).
 
 ## Layout
 
@@ -26,7 +26,7 @@ src/hf_lambda_mcp/
   server/                 Lambda: handler, llama-server manager, engine, S3 jobs
   client/cli.py           local stdio MCP client (uvx hf-lambda-mcp)
 docker/Dockerfile         Lambda image (llama.cpp + model + server)
-deployments/template.yaml one-click CloudFormation (CodeBuild image build + Lambda + Gateway)
+deployments/HFLambdaMCP.yaml one-click CloudFormation (CodeBuild image build + Lambda + Gateway)
 tests/                    pytest (no AWS needed; moto for S3)
 .sandbox/                 experiments, gitignored
 ```
@@ -38,7 +38,7 @@ Always run Python through uv.
 ```bash
 uv sync --all-extras
 uv run pytest
-uv run cfn-lint deployments/template.yaml
+uv run cfn-lint deployments/HFLambdaMCP.yaml
 uv run --extra build hf-lambda-mcp-build profiles/plamo-3-translate.yaml --variant 0.8b --out build
 ```
 

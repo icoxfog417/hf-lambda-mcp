@@ -50,7 +50,7 @@ by Preferred Networks, which translates between 53 languages.
 
 ### 1. Deploy
 
-Click **Launch Stack** (or deploy `deployments/template.yaml` yourself) and choose:
+Click **Launch Stack** (or deploy `deployments/HFLambdaMCP.yaml` yourself) and choose:
 
 | Parameter | Default | Notes |
 |---|---|---|
@@ -188,7 +188,7 @@ inversely proportional to the model file size; models of about 0.5–3 GB (≈0.
 ```bash
 uv sync --all-extras                 # client + build + dev dependencies
 uv run pytest                        # unit tests (no AWS needed)
-uv run cfn-lint deployments/template.yaml
+uv run cfn-lint deployments/HFLambdaMCP.yaml
 
 # Build an image locally
 uv run --extra build hf-lambda-mcp-build profiles/plamo-3-translate.yaml --variant 0.8b --out build
