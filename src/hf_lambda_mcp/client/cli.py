@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import contextvars
 import json
 import logging
 import re
@@ -48,48 +49,47 @@ class ToolError(Exception):
     pass
 
 
+_current_session: contextvars.ContextVar[ClientSession | None] = contextvars.ContextVar("hf_lambda_mcp_session", default=None)
+
+
 class Remote:
-    """A lazily (re)connected MCP client session to the Gateway."""
+    """MCP client for the Gateway.
+
+    A session is opened per local tool call with ``async with remote.session():`` and used by the
+    methods below through a context variable. Entering and exiting the transport in the same task is
+    required by anyio, and short-lived sessions always sign with fresh credentials.
+    """
 
     def __init__(self, endpoint: str, region: str | None, profile: str | None, timeout: float):
         self.endpoint, self.region, self.profile, self.timeout = endpoint, region, profile, timeout
-        self._stack: contextlib.AsyncExitStack | None = None
-        self._session: ClientSession | None = None
-        self._lock = asyncio.Lock()
 
-    async def _connect(self) -> ClientSession:
+    @contextlib.asynccontextmanager
+    async def session(self):
+        if _current_session.get() is not None:  # nested use within one call
+            yield
+            return
         from mcp_proxy_for_aws.client import aws_iam_streamablehttp_client
 
-        await self.close()
-        stack = contextlib.AsyncExitStack()
-        read, write, _ = await stack.enter_async_context(
-            aws_iam_streamablehttp_client(
-                endpoint=self.endpoint, aws_service="bedrock-agentcore", aws_region=self.region,
-                aws_profile=self.profile, timeout=self.timeout, sse_read_timeout=self.timeout,
-            )
-        )
-        session = await stack.enter_async_context(ClientSession(read, write))
-        await session.initialize()
-        self._stack, self._session = stack, session
-        return session
-
-    async def close(self) -> None:
-        if self._stack is not None:
-            with contextlib.suppress(Exception):
-                await self._stack.aclose()
-        self._stack, self._session = None, None
+        async with aws_iam_streamablehttp_client(
+            endpoint=self.endpoint, aws_service="bedrock-agentcore", aws_region=self.region,
+            aws_profile=self.profile, timeout=self.timeout, sse_read_timeout=self.timeout,
+        ) as (read, write, _), ClientSession(read, write) as s:
+            await s.initialize()
+            token = _current_session.set(s)
+            try:
+                yield
+            finally:
+                _current_session.reset(token)
 
     async def _with_session(self, fn):
-        async with self._lock:
-            for attempt in (1, 2):
-                try:
-                    session = self._session or await self._connect()
-                    return await fn(session)
-                except Exception:
-                    if attempt == 2:
-                        raise
-                    logger.warning("remote call failed; reconnecting", exc_info=True)
-                    await self.close()
+        s = _current_session.get()
+        if s is None:
+            async with self.session():
+                return await fn(_current_session.get())
+        return await fn(s)
+
+    async def close(self) -> None:
+        return None
 
     async def list_tools(self) -> list[types.Tool]:
         async def fn(s: ClientSession):
@@ -134,6 +134,10 @@ class Bridge:
     async def load(self) -> list[types.Tool]:
         if self.tools is not None:
             return self.tools
+        async with self.remote.session():
+            return await self._load()
+
+    async def _load(self) -> list[types.Tool]:
         remote_tools = await self.remote.list_tools()
         by_local: dict[str, types.Tool] = {}
         for t in remote_tools:
@@ -191,6 +195,16 @@ class Bridge:
     # ------------------------------------------------------------------ calls
 
     async def call(self, name: str, arguments: dict[str, Any], progress: Any) -> types.CallToolResult:
+        try:
+            async with self.remote.session():
+                return await self._call(name, arguments, progress)
+        except ToolError as e:
+            return types.CallToolResult(content=[types.TextContent(type="text", text=str(e))], isError=True)
+        except Exception as e:  # noqa: BLE001 - report transport/auth failures as tool errors
+            logger.exception("tool call failed")
+            return types.CallToolResult(content=[types.TextContent(type="text", text=f"{type(e).__name__}: {e}")], isError=True)
+
+    async def _call(self, name: str, arguments: dict[str, Any], progress: Any) -> types.CallToolResult:
         await self.load()
         try:
             if name in self.doc_tools:

@@ -13,7 +13,7 @@ Metadata:
       - Label: {default: Compute}
         Parameters: [Architecture, MemorySize, EnableSnapStart]
       - Label: {default: Source (advanced)}
-        Parameters: [SourceRepository, SourceRef, LlamaCppRef]
+        Parameters: [SourceRepository, SourceRef, LlamaCppRef, RebuildToken]
     ParameterLabels:
       ModelProfile: {default: Model profile (profiles/<name>.yaml)}
       ModelVariant: {default: Model variant (size)}
@@ -64,6 +64,10 @@ Parameters:
     Type: String
     Default: v0.9.0
     Description: llama.cpp git tag to build.
+  RebuildToken:
+    Type: String
+    Default: '1'
+    Description: Change this value on a stack update to force a fresh image build (e.g. after pushing to SourceRef).
 
 Conditions:
   IsArm: !Equals [!Ref Architecture, arm64]
@@ -240,6 +244,9 @@ Resources:
               - Effect: Allow
                 Action: [s3:DeleteObject, s3:DeleteObjectVersion]
                 Resource: !Sub '${ArtifactBucket.Arn}/*'
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-model*'
 
   BuildCoordinator:
     Type: AWS::Lambda::Function
@@ -247,7 +254,7 @@ Resources:
       Description: hf-lambda-mcp build coordinator (CloudFormation custom resource)
       Runtime: python3.12
       Handler: index.handler
-      Timeout: 300
+      Timeout: 900
       Role: !GetAtt BuildCoordinatorRole.Arn
       Environment:
         Variables:
@@ -258,8 +265,11 @@ Resources:
           import json, os, urllib.request
           import boto3
 
+          from botocore.config import Config
+
           cb = boto3.client("codebuild")
           s3 = boto3.client("s3")
+          lam = boto3.client("lambda", config=Config(read_timeout=840, retries={"max_attempts": 0}))
 
           def respond(req, status, reason="", data=None, physical_id=None):
               body = json.dumps({
@@ -280,8 +290,24 @@ Resources:
                   for i in range(0, len(objs), 1000):
                       s3.delete_objects(Bucket=bucket, Delete={"Objects": objs[i:i + 1000], "Quiet": True})
 
+          def warm_up(req):
+              # Invoke the new version once: pulls the fresh image into Lambda's cache (the first
+              # cold start of a new image is slow) and fails the deployment if the model cannot load.
+              fn = req["ResourceProperties"]["FunctionArn"]
+              r = lam.invoke(FunctionName=fn, Payload=json.dumps({"hf_lambda_mcp_ping": True}).encode())
+              body = r["Payload"].read().decode()
+              if r.get("FunctionError"):
+                  return respond(req, "FAILED", f"model function failed to start: {body[:2000]}")
+              info = json.loads(body)
+              respond(req, "SUCCESS", data={"InitSeconds": str(info.get("runtime", {}).get("init_s", ""))},
+                      physical_id=fn + "#warm")
+
           def on_cfn(req):
               kind = req["ResourceType"]
+              if kind == "Custom::WarmUp":
+                  if req["RequestType"] == "Delete":
+                      return respond(req, "SUCCESS")
+                  return warm_up(req)
               if kind == "Custom::BucketCleaner":
                   if req["RequestType"] == "Delete":
                       try:
@@ -375,6 +401,7 @@ Resources:
       SourceRef: !Ref SourceRef
       LlamaCppRef: !Ref LlamaCppRef
       Architecture: !Ref Architecture
+      RebuildToken: !Ref RebuildToken
 
   # ------------------------------------------------------------------ model Lambda
   ModelFunctionRole:
@@ -451,6 +478,15 @@ Resources:
       Qualifier: live
       MaximumRetryAttempts: 0
 
+  WarmUp:
+    Type: Custom::WarmUp
+    DependsOn: ModelFunctionAsyncConfig
+    Properties:
+      ServiceToken: !GetAtt BuildCoordinator.Arn
+      ServiceTimeout: 900
+      FunctionArn: !Ref ModelFunctionAlias
+      ImageTag: !GetAtt ModelImage.ImageTag
+
   # ------------------------------------------------------------------ AgentCore Gateway
   GatewayRole:
     Type: AWS::IAM::Role
@@ -489,6 +525,7 @@ Resources:
 
   GatewayTarget:
     Type: AWS::BedrockAgentCore::GatewayTarget
+    DependsOn: WarmUp
     Properties:
       GatewayIdentifier: !Ref Gateway
       Name: !Ref ModelProfile

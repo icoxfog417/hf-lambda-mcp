@@ -62,6 +62,8 @@ def model_info() -> dict[str, Any]:
 
 def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     event = dict(event or {})
+    if event.get("hf_lambda_mcp_ping"):
+        return model_info()  # deployment warm-up / health check
     if "hf_lambda_mcp_job" in event:
         return jobs.run_worker(ENGINE, event["hf_lambda_mcp_job"], context)
 

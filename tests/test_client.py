@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -41,7 +42,12 @@ class FakeRemote:
     """Mimics the Gateway: prefixed tool names, JSON text results, async job finishing after 2 polls."""
 
     def __init__(self, base):
-        self.base, self.polls, self.calls = base, 0, []
+        self.base, self.polls, self.calls, self.sessions = base, 0, [], 0
+
+    @contextlib.asynccontextmanager
+    async def session(self):
+        self.sessions += 1
+        yield
 
     async def list_tools(self):
         schema = {"type": "object", "properties": {"text": {"type": "string"}, "target_lang": {"type": "string"}},
