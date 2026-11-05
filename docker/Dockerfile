@@ -14,10 +14,17 @@ RUN dnf install -y gcc-c++ cmake git make && dnf clean all
 ARG LLAMA_CPP_REF=v0.9.0
 RUN git clone --depth 1 --branch ${LLAMA_CPP_REF} https://github.com/ggml-org/llama.cpp /src
 WORKDIR /src
-# GGML_BACKEND_DL + GGML_CPU_ALL_VARIANTS: build every CPU micro-architecture variant and pick
-# the best one at runtime, because Lambda does not guarantee a specific CPU generation.
-RUN cmake -B build -DCMAKE_BUILD_TYPE=Release \
-      -DGGML_NATIVE=OFF -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON \
+# x86_64: GGML_BACKEND_DL + GGML_CPU_ALL_VARIANTS builds every CPU micro-architecture variant and
+# picks the best at runtime, because Lambda does not guarantee a CPU generation.
+# arm64: AL2023's GCC 11 cannot target the newest ARM variants, so build one baseline that runs on
+# every Graviton generation used by Lambda (Armv8.2-A with dot product and FP16).
+ARG TARGETARCH
+RUN if [ "$TARGETARCH" = "arm64" ]; then \
+      CPU_FLAGS="-DGGML_BACKEND_DL=OFF -DGGML_CPU_ALL_VARIANTS=OFF -DGGML_CPU_ARM_ARCH=armv8.2-a+dotprod+fp16"; \
+    else \
+      CPU_FLAGS="-DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON"; \
+    fi \
+ && cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF $CPU_FLAGS \
       -DLLAMA_CURL=OFF -DLLAMA_OPENSSL=OFF -DBUILD_SHARED_LIBS=ON \
       -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=ON \
       -DCMAKE_INSTALL_RPATH='$ORIGIN' -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \

@@ -64,8 +64,19 @@ Deployment takes about 20â€“30 minutes (the image build takes most of it; add 5â
 
 ### 2. Connect your agent
 
-Requirements: [uv](https://docs.astral.sh/uv/) and AWS credentials that can call
-`bedrock-agentcore:InvokeGateway` on the gateway (the same credentials you use for the AWS CLI).
+Requirements: [uv](https://docs.astral.sh/uv/) and AWS credentials (the ones your AWS CLI uses) that are
+allowed to call the gateway. Administrators already are; for other identities, attach:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": "bedrock-agentcore:InvokeGateway",
+    "Resource": "<GatewayArn stack output>"
+  }]
+}
+```
 
 Copy the `ClientCommand` stack output. For **Claude Code** (`.mcp.json`):
 

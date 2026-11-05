@@ -544,6 +544,9 @@ Outputs:
   McpEndpointUrl:
     Description: MCP endpoint (IAM/SigV4). Use with the hf-lambda-mcp client or mcp-proxy-for-aws.
     Value: !GetAtt Gateway.GatewayUrl
+  GatewayArn:
+    Description: Grant bedrock-agentcore:InvokeGateway on this ARN to the IAM identities that may use the tools.
+    Value: !GetAtt Gateway.GatewayArn
   ClientCommand:
     Description: Command for your MCP client configuration (e.g. .mcp.json)
     Value: !Sub 'uvx --from git+${SourceRepository}@${SourceRef} hf-lambda-mcp ${Gateway.GatewayUrl}'
