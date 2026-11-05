@@ -42,7 +42,7 @@ DOWNLOAD_URL_TTL = 3600
 STALE_AFTER_S = 16 * 60  # a running job not updated for longer than a Lambda timeout is dead
 RESUME_MARGIN_MS = 120_000
 MAX_PARALLEL = int(os.environ.get("MAX_PARALLEL", "8"))
-MIN_CHUNKS_PER_SEGMENT = int(os.environ.get("MIN_CHUNKS_PER_SEGMENT", "2"))
+MIN_CHUNKS_PER_SEGMENT = int(os.environ.get("MIN_CHUNKS_PER_SEGMENT", "1"))
 
 _s3 = None
 _lambda = None

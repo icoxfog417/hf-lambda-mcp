@@ -11,7 +11,7 @@ Metadata:
       - Label: {default: Model}
         Parameters: [ModelProfile, ModelVariant, ContextLength]
       - Label: {default: Compute}
-        Parameters: [Architecture, MemorySize, EnableSnapStart]
+        Parameters: [Architecture, MemorySize, EnableSnapStart, MaxParallelSegments]
       - Label: {default: Source (advanced)}
         Parameters: [SourceRepository, SourceRef, LlamaCppRef, RebuildToken]
     ParameterLabels:
@@ -45,6 +45,15 @@ Parameters:
     MinValue: 2048
     MaxValue: 10240
     Description: Lambda memory in MB. vCPUs scale with memory (10240 MB = 6 vCPUs); inference speed scales with vCPUs.
+  MaxParallelSegments:
+    Type: Number
+    Default: 8
+    MinValue: 1
+    MaxValue: 64
+    Description: >-
+      Document jobs split the file into up to this many contiguous segments processed by parallel Lambda
+      invocations. Higher = faster; 1 = fully sequential, with chat history across the whole document
+      for maximum consistency.
   EnableSnapStart:
     Type: String
     Default: 'false'
@@ -449,6 +458,7 @@ Resources:
       Environment:
         Variables:
           JOB_BUCKET: !Ref ArtifactBucket
+          MAX_PARALLEL: !Ref MaxParallelSegments
 
   ModelFunctionLogs:
     Type: AWS::Logs::LogGroup

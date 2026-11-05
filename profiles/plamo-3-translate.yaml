@@ -59,6 +59,6 @@ tools:
         description: Japanese style (plain=だ・である, polite=です・ます). Only valid when target_lang is ja.
     document:
       formats: [txt, md]
-      max_chunk_tokens: 1024
+      max_chunk_tokens: 512
       history: 1
       output_name: "{stem}.{target_lang}{ext}"
