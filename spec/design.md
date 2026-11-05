@@ -49,21 +49,31 @@ Measured (2B Q4_K_M, 10240 MB, x86_64):
 | Strategy | Cold start (wall) | Idle cost |
 |---|---|---|
 | Plain (llama.cpp mmap against a lazily loaded image) | ~415 s | none |
-| **Parallel sequential prefetch** of the GGUF before `llama-server` starts (default) | **~30 s** | none |
+| **Parallel sequential prefetch** of the GGUF before `llama-server` starts (default) | **~5–80 s** (depends on Lambda's image cache) | none |
 | SnapStart (snapshot after load + warm-up) | ~11 s (2.2 s restore) | snapshot cache ≈ $0.0000015/GB-s ≈ **$40/month at 10 GB** |
 
 `llama-server` runs as a child process and survives a SnapStart snapshot and restore. The template
 parameter `EnableSnapStart` lets users trade idle cost for latency.
 
+The very first start of a newly pushed image is slow (≈170 s for 0.8B, ≈420 s for 2B), because Lambda pulls it
+from ECR for the first time. The `WarmUp` custom resource invokes each new version once before the Gateway target is
+created/updated. This absorbs that delay, and it fails the deployment if the model cannot load. Prefetch thread count
+(8–64) made no consistent difference; caching on the Lambda host dominates.
+
 ### Throughput and parallel documents
 
-Warm, 6 vCPU: 2B ≈ 19 tok/s generation and ≈ 69 tok/s prompt processing; 0.8B ≈ 58 and ≈ 117 tok/s.
-Thread count, flash attention and batch size made no measurable difference; the CPU (no AVX-512) is the limit.
+Warm, 6 vCPUs, x86_64: 2B ≈ 19 tok/s generation and ≈ 69 tok/s prompt processing; 0.8B ≈ 58 and ≈ 117 tok/s.
+Thread count, flash attention and batch size made no measurable difference on x86 (no AVX-512); the CPU is the limit.
+arm64 (Graviton) was faster: a 2B paragraph took 2.7 s against 6.5 s on x86, with prompt processing at 104 tok/s.
+arm64 is also ~20% cheaper per GB-second, so it is the default. The arm64 image uses a single
+`armv8.2-a+dotprod+fp16` build, because AL2023's GCC 11 cannot compile llama.cpp's armv9.2 variant.
 
 Consequences:
 
-- Document jobs split the chunk list into up to `MAX_PARALLEL` (8) contiguous segments, each processed by
-  its own asynchronous Lambda invocation. The total compute is the same; the wall-clock time is divided by the number of segments.
+- Document jobs split the chunk list into up to `MAX_PARALLEL` (template parameter `MaxParallelSegments`,
+  default 8) contiguous segments, each processed by its own asynchronous Lambda invocation. The total compute is the same;
+  the wall-clock time is divided by the number of segments. Measured: an 18 KB Markdown file as 3 sequential 1024-token
+  chunks took 305 s with 2B on x86, so the PLaMo profile uses 512-token chunks with one segment per chunk.
 - Within a segment, previous (input, output) pairs are sent as chat history for consistent terminology.
   The window **grows** (rather than sliding) while it fits in half of the context. Consecutive requests then share
   a prefix, and llama-server reuses its KV cache instead of re-processing ~2k prompt tokens per chunk.

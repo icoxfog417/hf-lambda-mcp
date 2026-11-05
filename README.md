@@ -57,7 +57,8 @@ Click **Launch Stack** (or deploy `deployments/template.yaml` yourself) and choo
 | `ModelProfile` | `plamo-3-translate` | A file in [`profiles/`](profiles) |
 | `ModelVariant` | `2b` | `0.8b` (fastest), `2b` (recommended), `8b` (best quality, slow on CPU) |
 | `MemorySize` | `10240` | vCPUs scale with memory; 10240 MB = 6 vCPUs, the fastest option |
-| `Architecture` | `x86_64` | `arm64` is also supported |
+| `Architecture` | `arm64` | arm64 was 1.5–2.4× faster than `x86_64` in our tests, and is cheaper |
+| `MaxParallelSegments` | `8` | Parallel Lambda invocations per document job; `1` = sequential with full chat history |
 | `EnableSnapStart` | `false` | `true` = faster cold starts, but an idle cost of ≈ USD 40/month at 10240 MB (see benchmarks) |
 
 Deployment takes about 20–30 minutes (the image build takes most of it; add 5–10 minutes with SnapStart).
@@ -119,31 +120,37 @@ The agent calls `translate_file(input_path="docs/guide.md", target_lang="en")` a
 | `create_upload`, `start_job`, `get_job` | Gateway | Generic document job API used by the client (hidden by default) |
 
 Markdown handling: front matter, fenced code blocks, HTML comments and `$$` math blocks are copied
-verbatim; everything else is translated paragraph-group by paragraph-group, with the preceding chunks
-passed as chat history for consistent terminology.
+verbatim. Everything else is translated in groups of paragraphs of about 512 tokens. Within each parallel segment,
+the preceding chunks are passed as chat history for consistent terminology. Use `glossary` to keep key
+terms consistent across segments.
 
 ## Benchmarks
 
-AWS Lambda, us-east-2, x86_64, llama.cpp v0.9.0, GGUF Q4_K_M, translating a 250-character Japanese
-paragraph into English (≈105 output tokens):
+AWS Lambda in us-east-2, 10240 MB (6 vCPUs), llama.cpp v0.9.0, GGUF Q4_K_M. Task: translate a
+250-character Japanese paragraph into English (≈105 output tokens). Times are for warm requests.
 
-| Variant | Memory (vCPU) | Generation | Prompt processing | Warm request |
-|---|---|---|---|---|
-| 0.8B | 10240 MB (6) | 58 tok/s | 117 tok/s | 1.8 s |
-| 0.8B | 3538 MB (3) | 25 tok/s | 50–97 tok/s | 4.2 s |
-| 2B | 10240 MB (6) | 19 tok/s | 65–69 tok/s | 5.5–7 s |
-| 2B | 5308 MB (4) | 11 tok/s | 19–35 tok/s | 9.8 s |
+| Variant | arm64 (default) | x86_64 |
+|---|---|---|
+| 0.8B | **1.1 s** | 1.8 s (58 tok/s generation) |
+| 2B | **2.7 s** (prompt processing 104 tok/s) | 5.5–7 s (19 tok/s generation, 69 tok/s prompt) |
 
-Cold start (new execution environment) for the 2B model at 10240 MB, wall clock including the first request:
+Fewer vCPUs are proportionally slower: x86 2B at 5308 MB (4 vCPUs) generates 11 tok/s. Because requests
+finish faster, the maximum memory setting costs about the same per request and is the default.
+
+**Documents** are split into chunks of about 512 tokens and processed in parallel, up to
+`MaxParallelSegments` (default 8) concurrent Lambda invocations.
+
+**Cold starts** (new execution environment, 2B model):
 
 | Strategy | Cold start | Idle cost |
 |---|---|---|
-| llama.cpp mmap straight from the lazily loaded image | ~420 s | none |
-| **Parallel prefetch of the model file** (default) | **~30 s** | none |
+| llama.cpp mmap straight from the lazily loaded image | ~7 min | none |
+| **Parallel prefetch of the model file** (default) | ~5–80 s, depending on Lambda's image cache | none |
 | SnapStart (`EnableSnapStart=true`) | ~11 s (2.2 s restore) | snapshot cache ≈ USD 0.0000015 per GB-second ≈ USD 40/month at 10240 MB |
 
-Peak memory for the 2B model is about 3.1 GB. Larger memory settings cost about the same per request,
-because the requests finish faster.
+The first start of a freshly deployed image is slower still: about 3 min for 0.8B and 7 min for 2B, while Lambda
+pulls the image from ECR for the first time. The stack absorbs this with a warm-up invocation before it completes.
+Peak memory for the 2B model is about 3.2 GB.
 
 ## Adding a model
 
