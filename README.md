@@ -19,6 +19,14 @@ by Preferred Networks, which translates between 53 languages.
 > [PLaMo Community License](https://plamo.preferredai.jp/info/plamo-community-license-en): commercial
 > use requires registration with PFN. The stack output `ModelLicense` links the license of the model you deployed.
 
+## Blog
+
+How it was built, how the network path works, and what we learned (ECR vs EFS, model-agnostic profiles,
+cold starts, arm64, parallel documents):
+
+- 日本語: [Hugging Face のモデルをワンクリックでサーバーレス MCP に](docs/blog/serverless-hf-mcp.ja.md)
+- English: [Turning Hugging Face Models into Serverless MCP with One Click](docs/blog/serverless-hf-mcp.en.md) (translated by PLaMo 3 Translate through this very system)
+
 ## How it works
 
 ```
