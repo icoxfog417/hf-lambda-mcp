@@ -1,0 +1,5 @@
+*
+!build/model/
+!build/runtime.json
+!src/hf_lambda_mcp/
+**/__pycache__
