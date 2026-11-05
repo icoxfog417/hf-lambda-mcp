@@ -37,8 +37,9 @@ Parameters:
     Description: llama.cpp context size in tokens. 0 = profile/model default (max 8192).
   Architecture:
     Type: String
-    Default: x86_64
-    AllowedValues: [x86_64, arm64]
+    Default: arm64
+    AllowedValues: [arm64, x86_64]
+    Description: arm64 (Graviton) was 1.5-2.4x faster than x86_64 in our benchmarks and is ~20% cheaper per GB-second.
   MemorySize:
     Type: Number
     Default: 10240
